@@ -1,0 +1,7 @@
+#version 330 core
+out vec4 Colors;
+in vec2 pos;
+void main()
+{
+	Colors = vec4((pos+1)/2, 0.0 , 1.0);
+}

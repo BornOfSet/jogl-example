@@ -1,0 +1,7 @@
+#version 330 core
+out vec4 Colors;
+in vec3 nm;
+void main()
+{
+	Colors = vec4(abs(nm) , 1.0);
+}

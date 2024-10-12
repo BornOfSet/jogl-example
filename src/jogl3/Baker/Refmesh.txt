@@ -1,0 +1,317 @@
+package jogl3.Baker;
+
+import static assimp.AiPostProcessStep.Triangulate;
+
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+
+import assimp.AiMesh;
+import assimp.AiScene;
+import assimp.Importer;
+import glm_.vec3.Vec3;
+
+public class Refmesh {
+	//这一几何体是单一网格，这一单一网格不和其他任何网格共同被处理。它拥有一套独立的顶点索引
+	//这一几何体是隐藏的，它没有装配对应的VBO，直接作为TBO输入shader，你只能在shader中看到它
+	//参考几何体：在它上面摄取法线信息
+	//从assimp中导出的时候，只需要输出顶点数据，法线是不必要的，随后我们会平滑法线
+	//index缓冲的尺寸是实际三角面数量的三倍，每一三角面的三个顶点都是连续储存的，要构建面，需要一次性抽取三个元素，并且以3为循环进行跳跃以构建下一个面
+	//理论上，你可以避免使用vertex 和index缓冲，不提取坐标值和顶点索引，而是直接在assimp提供的结构中运算
+	
+	
+	private class IfMachine{
+		float midX;
+		float midY;
+		float midZ;
+		float d4Xleft;
+		float d4Xright;
+		float d4Yleft;
+		float d4Yright;
+		float d4Zleft;
+		float d4Zright;
+		int find = -1;
+		float X;
+		float Y;
+		float Z;
+		public IfMachine(float midX,float d4Xright,float d4Xleft,
+									  float midY,float d4Yright,float d4Yleft,
+									  float midZ,float d4Zright,float d4Zleft) {
+			this.midX=midX;       
+			this.midY=midY;       
+			this.midZ=midZ;       
+			this.d4Xleft=d4Xleft;    
+			this.d4Xright=d4Xright;   
+			this.d4Yleft=d4Yleft;    
+			this.d4Yright=d4Yright;   
+			this.d4Zleft=d4Zleft;    
+			this.d4Zright=d4Zright;   
+		}
+		public int Start(float X , float Y , float Z) {
+			this.X = X;
+			this.Y = Y;
+			this.Z = Z;
+			if(X>midX) {
+				if(X>d4Xright) {
+					find = 48;
+					return IfY();
+				}
+				else if(X<=d4Xright) {
+					find = 32;
+					return IfY();
+				}
+			}
+			else if(X<=midX) {
+				if(X>d4Xleft) {
+					find = 16;
+					return IfY();
+				}
+				else if(X<=d4Xleft) {
+					find = 0;
+					return IfY();
+				}					
+			}
+			return -3;
+		}
+		private int IfY() {
+			if(Y>midY) {
+				if(Y>d4Yright) {
+					find += 12;
+					return IfZ();
+				}
+				else if(Y<=d4Yright) {
+					find += 8;
+					return IfZ();
+				}
+			}
+			else if(Y<=midY) {
+				if(Y>d4Yleft) {
+					find += 4;
+					return IfZ();
+				}
+				else if(Y<=d4Yleft) {
+					find += 0;
+					return IfZ();
+				}					
+			}
+			return -2;
+		}
+		private int IfZ() {
+			if(Z>midZ) {
+				if(Z>d4Zright) {
+					find += 3;
+					return find;
+				}
+				else if(Z<=d4Zright) {
+					find += 2;
+					return find;
+				}
+			}
+			else if(Z<=midZ) {
+				if(Z>d4Zleft) {
+					find += 1;
+					return find;
+				}
+				else if(Z<=d4Zleft) {
+					find += 0;
+					return find;
+				}					
+			}
+			return -1;
+		}
+	}
+	private class StructTriangle{
+		Vec3 A;
+		Vec3 B;
+		Vec3 C;
+		public StructTriangle(Vec3 A, Vec3 B, Vec3 C) {
+			this.A = A;
+			this.B = B;
+			this.C = C;
+		}
+	}
+	private class StructVertex{
+		Vec3 Position;
+		Vec3 Normal;
+		public StructVertex(Vec3 Position, Vec3 Normal) {
+			this.Position = Position;
+			this.Normal = Normal;
+		}
+	}
+	
+	float minX = Float.MAX_VALUE;
+	float maxX = Float.MIN_VALUE;
+	float minY = Float.MAX_VALUE;
+	float maxY = Float.MIN_VALUE;
+	float minZ = Float.MAX_VALUE;
+	float maxZ = Float.MIN_VALUE;
+	
+	public void LoadFromPath(String path) {
+		AiScene scene = new Importer().readFile(path , Triangulate.i);
+		ArrayList<AiMesh> MeshCollection = scene.getMeshes();
+		if(MeshCollection.size() > 1) {System.err.println("多于1个Mesh作为参考Mesh");}
+		AiMesh HiddenMesh = MeshCollection.get(0);
+		
+		int VertexNum = HiddenMesh.getNumVertices();
+		int FaceNum = HiddenMesh.getNumFaces();
+		List<Vec3> Vertices = HiddenMesh.getVertices();
+		List<List<Integer>> Faces = HiddenMesh.getFaces();
+		
+		for(int i = 0;i < VertexNum;i++) {
+			Vec3 position = Vertices.get(i);//一个表示位置的三浮点向量
+			float posX = position.getX();
+			float posY = position.getY();
+			float posZ = position.getZ();
+			minX = Math.min(minX, posX);
+			minY = Math.min(minY, posY);
+			minZ = Math.min(minZ, posZ);
+			maxX = Math.max(maxX, posX);
+			maxY = Math.max(maxY, posY);
+			maxZ = Math.max(maxZ, posZ);
+		}
+		float midX = (minX + maxX)/2;
+		float midY = (minY + maxY)/2;
+		float midZ = (minZ + maxZ)/2;	
+		float d4Xleft = (minX + midX)/2;
+		float d4Xright = (maxX + midX)/2;
+		float d4Yleft = (minY + midY)/2;
+		float d4Yright = (maxY + midY)/2;
+		float d4Zleft = (minZ + midZ)/2;
+		float d4Zright = (maxZ + midZ)/2;
+		
+		System.out.print(FaceNum + "FaceNum");
+		//221184vertex_size	110592face_size（这个没问题，三角面就是那么多）
+		//为什么点的数量会那么多？
+		//点的数量和面的数量理论上是没有关系的，因为可以重复利用
+		//如果点的数量增多，必然要么是法线，要么是UV造成的
+		
+		/*		ArrayList<ArrayList<StructTriangle>>{
+						0...ArrayList<StructTriangle>{
+										0...StructTriangle{
+														0...A
+														1...B
+														2...C
+										}
+										1...StructTriangle
+										2...StructTriangle
+										...
+										n...StructTriangle
+						}
+						1...ArrayList<StructTriangle>
+						2...ArrayList<StructTriangle>
+						...
+						63...ArrayList<StructTriangle>
+				}*/
+		ArrayList<ArrayList<StructTriangle>> TreeTriangle = new ArrayList<ArrayList<StructTriangle>>();
+		for(int i = 0;i < 64;i++) {
+			ArrayList<StructTriangle> VLAS = new ArrayList<StructTriangle>();//Variable length array strip
+			TreeTriangle.add(VLAS);
+		}
+		
+		int max = 0;
+		for(int i = 0;i < FaceNum;i++) {
+			List<Integer> Triangle = Faces.get(i);
+			int pAi = Triangle.get(0);  max = Math.max(max, pAi);
+			int pBi = Triangle.get(1);  max = Math.max(max, pBi);
+			int pCi = Triangle.get(2);  max = Math.max(max, pCi);
+			Vec3 pA = Vertices.get(pAi);
+			Vec3 pB = Vertices.get(pBi);
+			Vec3 pC = Vertices.get(pCi);
+			StructTriangle tri = new StructTriangle(pA,pB,pC);
+			float px_min = Math.min( Math.min( pA.getX() , pB.getX() ), pC.getX() );
+			float py_min = Math.min( Math.min( pA.getY() , pB.getY() ), pC.getY() );
+			float pz_min = Math.min( Math.min( pA.getZ() , pB.getZ() ), pC.getZ() );
+			IfMachine newMachine = new IfMachine(  midX, d4Xright, d4Xleft,
+																				   midY, d4Yright, d4Yleft,
+																				   midZ, d4Zright,  d4Zleft);
+			int find = newMachine.Start(px_min, py_min, pz_min);
+			ArrayList<StructTriangle> Sect = TreeTriangle.get(find);
+			Sect.add(tri);
+		}
+		System.out.print("\n" + max + "max" + VertexNum + "VertexNum\n");
+		
+		
+		HashMap<Vec3,ArrayList<Vec3>> VertexManager = new HashMap<Vec3,ArrayList<Vec3>>();
+		IntBuffer LayoutPointers = IntBuffer.allocate(64);
+		for(int i=0;i < 64;i++) {
+			ArrayList<StructTriangle> Sect = TreeTriangle.get(i);
+			LayoutPointers.put(Sect.size());
+			for(int k=0;k < Sect.size();k++) {
+				StructTriangle MemberTri =  Sect.get(k);
+				Vec3 v1 = MemberTri.A.minus(MemberTri.B);
+				Vec3 v2 = MemberTri.C.minus(MemberTri.B);
+				Vec3 HardNormal = v1.cross(v2);
+				//这里我们需要一个关联型数组，将顶点类作为索引，为对应的值（应该是一个arraylist）添加新的normal
+				/*		AllFaces{
+									0...Face alias MemberTri{
+												0...Vertex A{
+															0...Vec3 -- WorldPosition{
+																		0...float
+																		1...float
+																		2...float
+															}
+															1...Vec3 -- Normal
+												}
+												1...Vertex B
+												2...Vertex C
+									}
+									1...Face
+									...
+									n...Face -- The length is not certain
+					 	}
+				*/
+				/*
+				 * 		Mapping:
+				 * 		Vec3 Position -> Vec3 Normal
+				 * 		如何储存顶点数据：为了查找方便，顶点不适合写作类，而是要在哈希表当中隐喻。
+				 * 		顶点是一个函数f(x)，接受vec3类量，每输入一个vec3（实际上指向坐标），f(x)都能返回vec3类法线，相当于Vec3 n = GetVertexByPosition(Vec3 pos).GetNormal
+				 */
+				//每个位置上都可能有多个法线
+				if(VertexManager.containsKey(MemberTri.A)) {
+					ArrayList<Vec3> Normals = VertexManager.get(MemberTri.A);
+					Normals.add(HardNormal);
+				}
+				else {
+					VertexManager.put(MemberTri.A, new ArrayList<Vec3>());
+				}
+				if(VertexManager.containsKey(MemberTri.B)) {
+					ArrayList<Vec3> Normals = VertexManager.get(MemberTri.B);
+					Normals.add(HardNormal);
+				}
+				else {
+					VertexManager.put(MemberTri.B, new ArrayList<Vec3>());
+				}
+				if(VertexManager.containsKey(MemberTri.C)) {
+					ArrayList<Vec3> Normals = VertexManager.get(MemberTri.C);
+					Normals.add(HardNormal);
+				}
+				else {
+					VertexManager.put(MemberTri.C, new ArrayList<Vec3>());
+				}
+			}
+		}
+		LayoutPointers.flip();
+		
+		
+		//Struct Vertex { vec3 pos ; vec3 nml } 建立结构体，合并杂乱的位置和法线信息，统一管理顶点
+		//计算每个顶点上的平均法线
+		int count = 0;
+		ArrayList<ArrayList<StructVertex>> EntityList = new ArrayList<ArrayList<StructVertex>>();
+		ArrayList<StructVertex> Entity = new ArrayList<StructVertex>();
+		for(Vec3 Pos : VertexManager.keySet()) {
+			ArrayList<Vec3> Normals = VertexManager.get(Pos);
+			Vec3 Sum = new Vec3(0,0,0);
+			for(int L = 0; L < Normals.size();L++) {
+				Sum = Sum.plus(Normals.get(L));
+			}
+			Vec3 avg = Sum.div(Normals.size());
+			Entity.add(new StructVertex(Pos,avg));  count += 1;
+		}
+		EntityList.add(Entity);
+		System.out.println("\n" + count + "count");
+		
+		
+	}
+}

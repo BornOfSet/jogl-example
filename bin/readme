@@ -1,0 +1,260 @@
+操作内容
+WS：缩放模型
+AD：平移模型
+QE：平移模型
+鼠标点击：旋转模型
+Shift AD：调整光照
+V：切换渲染器
+空格：将当前屏幕内容压入RT栈
+Shift空格：渲染RT
+
+当你对3D模式下的模型进行导出的时候：
+首先，你需要正在渲染到RT。
+这将启用该FBO，该FBO具有两个通道，index0-> null ; index1->attachment1
+然后我们读取GL_COLOR_ATTACHMENT1
+但是因为，GL_COLOR_ATTACHMENT1对应的是1
+而在3D模式下
+只有一个location=0（默认位置）的输出
+所以GL_COLOR_ATTACHMENT1是一片漆黑
+而该默认位置的输出，因为接收者是none，所以被抛弃
+但如果你使用默认帧缓冲，
+因为default FB 的drawbuffer数组默认相当于{GL_FRONT}
+这个index0，是可以接收到FS输出的颜色的
+所以正常显示
+要解决这个问题
+给PS加一个GL_COLOR_ATTACHMENT1输出就行了
+但会不会导致……正常渲染的时候，渲染到默认FB，出现问题，因为你没有绑定index1这个drawbuffer？
+如果你输出到attachment0，同时将A0的序号挪到index1，把A1换到index0，这样你输出法线到A0，但A1输出的是正常UV
+这意味着，location 1要换成0 ，0要换成1；rt是0，正常颜色是1
+当换回默认FB的时候，0位置写入的是A1，应该是没问题的
+因为0位置就是正常颜色
+0——正常颜色
+1——rt
+DFB——只有0
+FBO——0 和 1
+Read——只读0（为了和3D模式兼容，不输出黑色）
+要让DFB输出正常颜色，就要0位置输出正常颜色
+要让Read读到法线，就要0位置输出法线
+好吧，自相矛盾
+不不不什么鬼，你读的是attachment1，你看的不是DFB里面有没有这个attachmen1，而是看使用不同program的时候，有没有东西往attachment1对应的location里面写字
+在这里，其实attachmen0和attachment1没有区别。有区别的是你一个FBO里有几个通道，这些通道的标号是多少
+我们可以简单地说，DFB只往i1里面输入……不能，并不能这么说
+只能说
+DFB只有i0；
+PS只往i0里输入；
+PSUV往i0和i1输入
+FBO只有i0的话：i1没人要了：PSUV的i0输入法线：用在DFB上，i0照样是法线
+FBO只有i1的话：i0没人要了：PSUV的i1输入法线，用在DFB上，i0输入默认
+所以得出，FBO要用i1，读要读i1
+读DFB……不，你怎么可能读DFB，你只能读FBO。但是可以变的是读哪个shader
+读没有i1的PS的时候，输出就是黑的
+你只想关心index，drawbuffer的index，不是attachment后面跟的i几
+你读什么也是不用关心的。你读的时候必然用的是FBO，你读也肯定读的是FBO，现在我FBO里只有一个attachment，那你不是百分百读它？
+唯一要关心的是，这个attachment的location是多少，从而着色器往其中写入什么？
+着色器的输出没有接收者，是被抛弃的
+因此这多出来的1，用在DFB上，没问题
+用在FBO上，是0多出来，1是刚刚好可以被用上的
+
+
+
+
+
+
+基本思想：
+计算模型的bounding box（遍历每个顶点，找到maxX,maxY,maxZ和minX.....）
+把bounding box分为64分
+4*4*4=64
+这64个BOX是加速结构
+先迭代光子，计算和哪个box相交
+然后找到BOX对应的ID
+我们将顶点用TBO传入GPU（按照0到63的顺序，逐子BOX）
+所以需要规划哪个盒子从哪里开始（用到的是TBOlayout）
+然后对盒子容纳的所有三角形进行相交测试
+当然，目前我只做了基本功能，是对点进行相交测试
+测试很简单
+作过光源和几何表面上一点的直线，看是否和光线追踪方向平行
+如果平行（容差小于E），那就把当前的片元标记为白色，否则就是黑色
+从另一个角度来说，平行，意味着
+方程y=x+td
+new_loc表面上任一点=original光源位置+step*ray_direction
+如果step.x=step.y=step.z，vec3 step等于标量step，意味着方程成立
+可以看到我之前就是这么做的，但因为ray direction中可能有0组件，所以最后换了个方法
+
+这个红色的是遮罩，只是简单地将子BOX全部显示出来了
+
+
+光追的视角有两种设置：
+1.单点式，Photon不随屏幕坐标变化，根据屏幕坐标采用RaymarchDirection，最后的效果类似从一点看球形HDR，带透视效果
+2.分布式，Photon（光源位置）随屏幕坐标变化，但光追方向统一，类似正交视图
+
+多几何体光追：
+很简单，首先用一个大循环套住，大循环处理光子沿着路径的迭代
+在每一次迭代中，计算场景内所有的子BOX，算他们到当前位置的光子的距离，取最短的，作为step进行下次推进
+这是为了做深度检测，如果两个子BOX一前一后，我们取最前面的那个
+因为子BOX是无序的，所以你得检测所有的BOX并且比较
+最后，检测完所有BOX，如果发现distance < E（容差），那么就说明当前的光子落在“反正肯定存在有这么一个”平面上
+所有的这些“落在至少存在，反正存在，肯定存在的平面上的点“，组成了所有几何体的交集
+
+
+
+
+
+
+
+
+
+		public void Ipsilateral(float MinX, float MinY, float MinZ) {
+			float x1 = PA.getX();
+			float x2 = PB.getX();
+			float x3 = PC.getX();
+			boolean org = true;
+			if(abs(x1-midX)+abs(x2-midX)+abs(x3-midX)-abs(x1+x2+x3-3*midX)>TH) {
+				MinX = midX;
+				Vec3 nv3 = new Vec3(MinX,MinY,MinZ);
+				MinList.add(nv3);
+				IY(MinX, MinY,MinZ);
+				org = false;
+			}
+			else if(abs(x1-d4Xleft)+abs(x2-d4Xleft)+abs(x3-d4Xleft)-abs(x1+x2+x3-3*d4Xleft)>TH){
+				MinX = d4Xleft;
+				Vec3 nv3 = new Vec3(MinX,MinY,MinZ);
+				MinList.add(nv3);
+				IY(MinX, MinY,MinZ);
+				org = false;
+			}
+			else if(abs(x1-d4Xright)+abs(x2-d4Xright)+abs(x3-d4Xright)-abs(x1+x2+x3-3*d4Xright)>TH) {
+				MinX = d4Xright;
+				Vec3 nv3 = new Vec3(MinX,MinY,MinZ);
+				MinList.add(nv3);
+				IY(MinX, MinY,MinZ);
+				org = false;
+			}
+			else if(org) {
+				OnEdge += 1;
+				IY(MinX, MinY,MinZ);
+			}
+		}
+		private void IY(float X, float MinY,float MinZ) {
+			float y1 = PA.getY();
+			float y2 = PB.getY();
+			float y3 = PC.getY();
+			boolean org = true;
+			if(abs(y1-midY)+abs(y2-midY)+abs(y3-midY)-abs(y1+y2+y3-3*midY)>TH) {
+				MinY = midY;
+				Vec3 nv3 = new Vec3(X,MinY,MinZ);
+				MinList.add(nv3);
+				IZ(X, MinY,MinZ);
+				org = false;
+			}
+			else if(abs(y1-d4Yleft)+abs(y2-d4Yleft)+abs(y3-d4Yleft)-abs(y1+y2+y3-3*d4Yleft)>TH){
+				MinY = d4Yleft;
+				Vec3 nv3 = new Vec3(X,MinY,MinZ);
+				MinList.add(nv3);
+				IZ(X, MinY,MinZ);
+				org = false;
+			}
+			else if(abs(y1-d4Yright)+abs(y2-d4Yright)+abs(y3-d4Yright)-abs(y1+y2+y3-3*d4Yright)>TH) {
+				MinY = d4Yright;
+				Vec3 nv3 = new Vec3(X,MinY,MinZ);
+				MinList.add(nv3);
+				IZ(X, MinY,MinZ);
+				org = false;
+			}	
+			else if(org) {
+				OnEdge += 1;
+				IZ(X, MinY,MinZ);
+			}	
+		}
+		private void IZ(float X, float Y, float MinZ) {
+			float z1 = PA.getZ();
+			float z2 = PB.getZ();
+			float z3 = PC.getZ();
+			boolean org = true;
+			if(abs(z1-midZ)+abs(z2-midZ)+abs(z3-midZ)-abs(z1+z2+z3-3*midZ)>TH) {
+				MinZ = midZ;
+				Vec3 nv3 = new Vec3(X,Y,MinZ);
+				MinList.add(nv3);
+				org = false;		
+			}
+			else if(abs(z1-d4Zleft)+abs(z2-d4Zleft)+abs(z3-d4Zleft)-abs(z1+z2+z3-3*d4Zleft)>TH){
+				MinZ = d4Zleft;
+				Vec3 nv3 = new Vec3(X,Y,MinZ);
+				MinList.add(nv3);
+				org = false;
+			}
+			else if(abs(z1-d4Zright)+abs(z2-d4Zright)+abs(z3-d4Zright)-abs(z1+z2+z3-3*d4Zright)>TH) {
+				MinZ = d4Zright;
+				Vec3 nv3 = new Vec3(X,Y,MinZ);
+				MinList.add(nv3);
+				org = false;
+			}	
+			else if(org) {
+				if(OnEdge < 2) {
+					Vec3 nv3 = new Vec3(X,Y,MinZ);
+					MinList.add(nv3);
+				}
+			}		
+		}
+
+		private void F() {
+		/*
+		 * Receive MinX, MinY
+		 * 
+		 * List.add(MinX, MinY) //左下角
+		 * 
+		 * bool X = false
+		 * if(LpsX(PA,PB,PC,MidX)){
+		 * 		MinX = MidX
+		 * 		x = true
+		 * }
+		 * if(LpsX(PA,PB,PC,LeftX)){
+		 * 		MinX = LeftX
+		 * 		x = true
+		 * }
+		 * if(LpsX(PA,PB,PC,RightX)){
+		 * 		MinX = RightX
+		 * 		x = true
+		 * }
+		 * if(x){
+		 * 		List.add(MinX, MinY)//右下角
+		 * }
+		 * 
+		 * 
+		 * bool Y = false
+		 * if(LpsY(PA,PB,PC,MidY)){
+		 * 		MinY = MidY
+		 * 		y = true
+		 * }
+		 * if(LpsY(PA,PB,PC,LeftY)){
+		 * 		MinY = LeftY
+		 * 		y = true
+		 * }
+		 * if(LpsY(PA,PB,PC,RightY)){
+		 * 		MinY = RightY
+		 * 		y = true
+		 * }
+		 * if(y){
+		 * 		List.add(MinX, MinY)//右上角
+		 * }
+		 * 
+		 * for(左，右)
+		 * 		for(上，下)
+		 * 			for(前，后)
+		 * 
+		 * else if要改成if。else if处理的不是四角问题，而是一个三角形确实有可能同时跨越多个柱
+		 * 
+		 */
+		}
+		/*
+		 * if(lpsilateralX(MidX))
+		 * 		MinX = MidX
+		 * 		if(lpsilateralY(LeftY))  
+		 *      	MinY = LeftY        
+		 *      	if(lpsilateralZ(RightZ))  
+		 *      		MinZ = RightZ        
+		 * 				for(i 0,1)
+		 * 					for(j 0,1)
+		 * 						for(k 0,1)
+		 * 							List.add(MinX * (1-i) + ColX * i, MinY * (1-j) + ColY * j, MinZ * (1-k) + ColZ)
+		 * 
+		 */
